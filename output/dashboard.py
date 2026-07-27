@@ -340,8 +340,8 @@ class Dashboard:
 
             # Variance
             vr = per_ap.get(ap.mac)
-            delta = f"{vr.std_delta:.1f}" if vr else "—"
-            motion = f"{vr.motion_score:.0%}" if vr else "—"
+            delta = f"{vr.std_delta:.1f}" if vr else "0.0"
+            motion = f"{vr.motion_score:.0%}" if vr else "0%"
             motion_style = ""
             if vr and vr.motion_score > 0.5:
                 motion_style = "bold yellow"

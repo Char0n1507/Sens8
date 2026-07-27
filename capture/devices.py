@@ -188,9 +188,13 @@ class DeviceTracker:
     def total_updates(self) -> int:
         return self._total_updates
 
-    def get_strongest_aps(self, n: int = 5) -> List[DeviceRecord]:
-        """Get top N APs by latest RSSI (strongest signal)."""
-        aps = self.get_aps()
+    def get_strongest_aps(self, n: int = 12, max_age: float = 15.0) -> List[DeviceRecord]:
+        """Get top N APs by latest RSSI active within max_age seconds."""
+        cutoff = time.time() - max_age
+        aps = [
+            d for d in self.get_aps(min_samples=1)
+            if d.last_seen >= cutoff
+        ]
         aps.sort(key=lambda d: d.latest_rssi or -999, reverse=True)
         return aps[:n]
 
