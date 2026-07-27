@@ -102,23 +102,23 @@ class ManagedScanner:
             time.sleep(dump_interval)
 
     def _trigger_scan(self):
-        """Trigger a new scan. Non-blocking — results read from dump."""
-        try:
-            result = subprocess.run(
-                f"iw dev {self.interface} scan trigger 2>/dev/null",
-                shell=True, capture_output=True, text=True, timeout=5
-            )
-            if result.returncode != 0:
-                # Scan trigger can fail if scan is already in progress
-                # Fall back to regular scan (blocking but reliable)
-                subprocess.run(
-                    f"iw dev {self.interface} scan 2>/dev/null",
-                    shell=True, capture_output=True, text=True, timeout=10
+        """Trigger a new scan asynchronously. Non-blocking — results read from dump."""
+        def _do_scan():
+            try:
+                result = subprocess.run(
+                    f"iw dev {self.interface} scan trigger 2>/dev/null",
+                    shell=True, capture_output=True, text=True, timeout=3
                 )
-        except subprocess.TimeoutExpired:
-            pass
-        except Exception as e:
-            logger.debug(f"Scan trigger error: {e}")
+                if result.returncode != 0:
+                    subprocess.run(
+                        f"iw dev {self.interface} scan 2>/dev/null",
+                        shell=True, capture_output=True, text=True, timeout=6
+                    )
+            except Exception as e:
+                logger.debug(f"Scan trigger error: {e}")
+
+        threading.Thread(target=_do_scan, daemon=True, name="iw-scan-trigger").start()
+
 
     def _read_scan_dump(self):
         """Read cached scan results from last scan."""
