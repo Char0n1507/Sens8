@@ -16,41 +16,46 @@ RUVIEW_HTTP_URL = "http://localhost:3000"
 # ─── Capture Settings ────────────────────────────────────────────────
 SAMPLE_RATE = 10                    # target Hz for CSI frame output
 RSSI_WINDOW_SIZE = 500              # sliding window samples per MAC
-CHANNEL_HOP = True                  # hop channels for broader visibility
+CHANNEL_HOP = True                  # hop channels (monitor mode only)
 CHANNEL_HOP_INTERVAL = 0.5         # seconds per channel
-CHANNELS_24GHZ = [1, 6, 11]        # 2.4 GHz non-overlapping channels
-CHANNELS_5GHZ = [36, 40, 44, 48]   # 5 GHz channels (if card supports)
+CHANNELS_24GHZ = [1, 6, 11]        # 2.4 GHz non-overlapping
+CHANNELS_5GHZ = [36, 40, 44, 48]   # 5 GHz channels
+
+# ─── Managed Mode Scan Settings ──────────────────────────────────────
+MANAGED_SCAN_INTERVAL = 3.0        # seconds between full scan triggers
+MANAGED_DUMP_INTERVAL = 0.8        # seconds between scan dump reads
+# Lower dump interval = faster RSSI updates = better accuracy
 
 # ─── Baseline Calibration ────────────────────────────────────────────
 BASELINE_DURATION = 30              # seconds of initial calibration
-BASELINE_UPDATE_INTERVAL = 60      # seconds between EMA baseline updates
-BASELINE_EMA_ALPHA = 0.1           # exponential moving average smoothing
+BASELINE_UPDATE_INTERVAL = 60      # seconds between EMA updates
+BASELINE_EMA_ALPHA = 0.1           # exponential moving average alpha
 
 # ─── Motion Detection ────────────────────────────────────────────────
-MOTION_WINDOW = 5                   # seconds for variance window
-MOTION_SCORE_SMOOTHING = 0.3       # EMA alpha for motion score
+MOTION_WINDOW = 10                  # seconds (increased from 5 for more data)
+MOTION_SCORE_SMOOTHING = 0.4       # EMA alpha for motion score
 
 # ─── Presence Detection ──────────────────────────────────────────────
-PRESENCE_THRESHOLD = 0.35          # variance threshold for presence
+PRESENCE_THRESHOLD = 0.15          # variance threshold (tuned lower for managed)
 PRESENCE_HYSTERESIS = 3            # consecutive frames before state change
 PRESENCE_MAX_CONFIDENCE = 0.75     # cap — honest about RSSI limitations
 
 # ─── Person Counting (DBSCAN) ────────────────────────────────────────
-DBSCAN_EPS = 0.3                   # clustering sensitivity
-DBSCAN_MIN_SAMPLES = 2            # min APs to form a cluster
+DBSCAN_EPS = 0.5                   # clustering sensitivity (relaxed)
+DBSCAN_MIN_SAMPLES = 2            # min points to form a cluster
 COUNT_HYSTERESIS = 3               # frames before count changes
 COUNT_UPDATE_INTERVAL = 2          # seconds between count updates
-MIN_APS_FOR_COUNTING = 3          # need at least 3 APs for meaningful clusters
+MIN_APS_FOR_COUNTING = 3          # need 3+ APs for meaningful clusters
 
 # ─── Vitals Estimation ───────────────────────────────────────────────
 BREATHING_CONFIDENCE_MIN = 0.4     # don't report below this
 BREATHING_BAND_LOW = 0.1           # Hz  (6 BPM)
 BREATHING_BAND_HIGH = 0.5          # Hz  (30 BPM)
-VITALS_WINDOW_SECONDS = 30        # seconds of data for vitals analysis
+VITALS_WINDOW_SECONDS = 30        # seconds of data for analysis
 
 # ─── Synthetic CSI ────────────────────────────────────────────────────
 CSI_SUBCARRIERS = 56               # number of synthetic subcarriers
-CSI_FRAME_RATE = 10                # Hz — match RuView expectation
+CSI_FRAME_RATE = 10                # Hz
 CSI_SOURCE_TAG = "software-rssi"   # tag to distinguish from real CSI
 
 # ─── Dashboard ────────────────────────────────────────────────────────
@@ -59,4 +64,4 @@ DASHBOARD_RSSI_BARS = True         # show signal strength bars
 
 # ─── Logging ──────────────────────────────────────────────────────────
 LOG_LEVEL = "INFO"
-LOG_FILE = None                    # set to path to enable file logging
+LOG_FILE = None

@@ -2,12 +2,15 @@
 """
 Sens8 — WiFi Sensing Daemon
 Pure software WiFi sensing using RSSI-based detection.
-Detects presence, motion, occupancy, and person count using ambient WiFi signals.
+
+DEFAULT MODE: Managed-mode scanning — WiFi stays connected.
+Only uses monitor mode with --force-monitor flag.
 
 Usage:
-    sudo python main.py [OPTIONS]
-
-Requires root for monitor mode and raw packet capture.
+    sudo python3 main.py              # safe — WiFi stays connected
+    sudo python3 main.py -i wlan1     # specify interface
+    sudo python3 main.py --no-dashboard  # headless
+    sudo python3 main.py --force-monitor # WILL disconnect WiFi
 """
 
 import os
@@ -20,17 +23,17 @@ import threading
 
 from rich.console import Console
 
-# ─── Ensure project root is in path ──────────────────────────────────
+# Ensure project root is in path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
 from capture.monitor import (
-    detect_interface, enable_monitor_mode, get_chipset_info,
-    get_current_mode, supports_monitor_mode, start_channel_hopping,
-    cleanup as monitor_cleanup,
+    detect_interface, setup_capture, get_chipset_info,
+    get_current_mode, get_connected_ssid, start_channel_hopping,
+    cleanup as monitor_cleanup, CaptureMode,
 )
 from capture.devices import DeviceTracker
-from capture.scanner import PacketScanner, ManagedModeScanner
+from capture.scanner import ManagedScanner, MonitorScanner
 from processing.baseline import BaselineCalibrator
 from processing.variance import VarianceAnalyzer
 from processing.presence import PresenceDetector
@@ -42,107 +45,67 @@ from output.dashboard import Dashboard, show_startup_banner
 from output.websocket import WebSocketOutput
 
 
-# ─── Logging Setup ────────────────────────────────────────────────────
 def setup_logging(level: str = "INFO", log_file: str = None):
-    """Configure logging."""
     fmt = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
     handlers = [logging.StreamHandler(sys.stderr)]
-
     if log_file:
         handlers.append(logging.FileHandler(log_file))
-
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
-        format=fmt,
-        handlers=handlers,
+        format=fmt, handlers=handlers,
     )
-    # Quiet noisy loggers
     logging.getLogger("scapy").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
-# ─── CLI Arguments ────────────────────────────────────────────────────
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Sens8 — WiFi Sensing Daemon (RSSI-based)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  sudo python main.py                         # auto-detect interface
-  sudo python main.py -i wlan1                # specify interface
-  sudo python main.py --no-dashboard          # headless mode
-  sudo python main.py --no-ruview             # skip RuView integration
-  sudo python main.py --log-level DEBUG       # verbose logging
-  sudo python main.py --baseline-duration 60  # longer calibration
+  sudo python3 main.py                    # auto-detect, WiFi stays connected
+  sudo python3 main.py -i wlan1           # specify interface
+  sudo python3 main.py --no-dashboard     # headless mode
+  sudo python3 main.py --no-ruview        # no RuView integration
+  sudo python3 main.py --force-monitor    # use monitor mode (disconnects WiFi!)
+  sudo python3 main.py --log-level DEBUG  # verbose
         """,
     )
 
-    parser.add_argument(
-        "-i", "--interface",
-        default=None,
-        help="WiFi interface (default: auto-detect)",
-    )
-    parser.add_argument(
-        "--no-dashboard",
-        action="store_true",
-        help="Disable terminal dashboard (headless mode)",
-    )
-    parser.add_argument(
-        "--no-ruview",
-        action="store_true",
-        help="Disable RuView UDP/WS integration",
-    )
-    parser.add_argument(
-        "--no-channel-hop",
-        action="store_true",
-        help="Disable channel hopping",
-    )
-    parser.add_argument(
-        "--baseline-duration",
-        type=int,
-        default=config.BASELINE_DURATION,
-        help=f"Baseline calibration duration in seconds (default: {config.BASELINE_DURATION})",
-    )
-    parser.add_argument(
-        "--log-level",
-        default=config.LOG_LEVEL,
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging level",
-    )
-    parser.add_argument(
-        "--log-file",
-        default=None,
-        help="Log to file",
-    )
-    parser.add_argument(
-        "--ruview-host",
-        default=config.RUVIEW_HOST,
-        help=f"RuView host (default: {config.RUVIEW_HOST})",
-    )
-    parser.add_argument(
-        "--ruview-port",
-        type=int,
-        default=config.RUVIEW_UDP_PORT,
-        help=f"RuView UDP port (default: {config.RUVIEW_UDP_PORT})",
-    )
+    parser.add_argument("-i", "--interface", default=None,
+                        help="WiFi interface (default: auto-detect)")
+    parser.add_argument("--force-monitor", action="store_true",
+                        help="Force monitor mode (WARNING: disconnects WiFi!)")
+    parser.add_argument("--no-dashboard", action="store_true",
+                        help="Disable terminal dashboard")
+    parser.add_argument("--no-ruview", action="store_true",
+                        help="Disable RuView integration")
+    parser.add_argument("--no-channel-hop", action="store_true",
+                        help="Disable channel hopping")
+    parser.add_argument("--baseline-duration", type=int,
+                        default=config.BASELINE_DURATION,
+                        help=f"Calibration seconds (default: {config.BASELINE_DURATION})")
+    parser.add_argument("--log-level", default=config.LOG_LEVEL,
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--log-file", default=None)
+    parser.add_argument("--ruview-host", default=config.RUVIEW_HOST)
+    parser.add_argument("--ruview-port", type=int, default=config.RUVIEW_UDP_PORT)
 
     return parser.parse_args()
 
 
-# ─── Root Check ───────────────────────────────────────────────────────
 def check_root():
-    """Verify running as root."""
     if os.geteuid() != 0:
-        print("\n[!] Sens8 requires root privileges for monitor mode and packet capture.")
-        print("    Run with: sudo python main.py\n")
+        print("\n[!] Sens8 requires root for WiFi scanning.")
+        print("    Run with: sudo python3 main.py\n")
         sys.exit(1)
 
 
-# ─── Main Orchestration ──────────────────────────────────────────────
 def main():
     args = parse_args()
 
-    # Apply CLI overrides to config
+    # Apply CLI overrides
     if args.no_channel_hop:
         config.CHANNEL_HOP = False
     config.RUVIEW_HOST = args.ruview_host
@@ -164,24 +127,33 @@ def main():
             sys.exit(1)
 
     chipset = get_chipset_info(interface)
-    logger.info(f"Interface: {interface}, Chipset: {chipset}")
+    ssid = get_connected_ssid(interface)
 
-    # ─── Monitor Mode ────────────────────────────────────────
-    monitor_ok = False
-    if supports_monitor_mode(interface):
-        monitor_ok = enable_monitor_mode(interface)
+    if ssid:
+        console.print(f"  [green]Connected to:[/green] [bold]{ssid}[/bold]")
 
-    mode = get_current_mode(interface)
+    # ─── Setup Capture Mode (SAFE by default) ────────────────
+    capture_mode, capture_iface = setup_capture(
+        interface, force_monitor=args.force_monitor
+    )
 
-    if not monitor_ok:
+    mode_labels = {
+        CaptureMode.MANAGED_SCAN: "managed-scan (WiFi preserved ✓)",
+        CaptureMode.VIRTUAL_MONITOR: "virtual-monitor (mon0, WiFi preserved ✓)",
+        CaptureMode.DIRECT_MONITOR: "direct-monitor (WiFi disconnected ⚠)",
+    }
+    mode_label = mode_labels[capture_mode]
+
+    show_startup_banner(console, interface, chipset, mode_label)
+
+    # Warn if WiFi was disconnected
+    if capture_mode == CaptureMode.DIRECT_MONITOR:
         console.print(
-            f"[yellow]⚠ Monitor mode unavailable on {interface}. "
-            f"Falling back to managed mode scanning.[/yellow]"
+            "[bold yellow]⚠ WiFi connection disconnected for monitor mode.[/bold yellow]"
         )
-        mode = "managed (fallback)"
-
-    # Show banner
-    show_startup_banner(console, interface, chipset, mode)
+        console.print(
+            "[dim]  WiFi will be restored when Sens8 exits (Ctrl+C).[/dim]"
+        )
 
     # ─── Initialize Components ────────────────────────────────
     tracker = DeviceTracker()
@@ -191,17 +163,17 @@ def main():
     counter = PersonCounter(variance)
     vitals = VitalsEstimator(tracker)
 
-    # Scanner
-    if monitor_ok:
-        scanner = PacketScanner(interface, tracker)
+    # Create appropriate scanner
+    if capture_mode in (CaptureMode.VIRTUAL_MONITOR, CaptureMode.DIRECT_MONITOR):
+        scanner = MonitorScanner(capture_iface, tracker)
     else:
-        scanner = ManagedModeScanner(interface, tracker)
+        scanner = ManagedScanner(capture_iface, tracker)
 
     # Synthetic CSI
     frame_builder = CSIFrameBuilder(variance, presence, counter)
     udp_sender = UDPSender(frame_builder)
 
-    # WebSocket output
+    # WebSocket
     ws_output = WebSocketOutput()
 
     # Dashboard
@@ -210,7 +182,7 @@ def main():
         dashboard = Dashboard(
             interface=interface,
             chipset=chipset,
-            mode=mode,
+            mode=mode_label,
             tracker=tracker,
             variance=variance,
             presence=presence,
@@ -221,98 +193,118 @@ def main():
         )
 
     # ─── Start Capture ────────────────────────────────────────
-    console.print("[bold cyan]Starting packet capture...[/bold cyan]")
+    console.print("[bold cyan]Starting capture...[/bold cyan]")
     scanner.start()
 
-    if monitor_ok:
-        start_channel_hopping(interface)
+    if capture_mode != CaptureMode.MANAGED_SCAN:
+        start_channel_hopping(capture_iface)
 
-    # ─── Calibration Phase ────────────────────────────────────
-    console.print(
-        f"[bold yellow]Calibrating baseline ({args.baseline_duration}s)...[/bold yellow]"
-    )
-    baseline.calibrate(duration=args.baseline_duration)
+    # ─── Calibration ──────────────────────────────────────────
+    cal_dur = args.baseline_duration
+    console.print(f"[bold yellow]Calibrating baseline ({cal_dur}s)...[/bold yellow]")
+    console.print("[dim]  Walk away from the device during calibration for best results.[/dim]")
 
-    baselines = baseline.baselines
+    baseline.calibrate(duration=cal_dur)
+
+    bl_count = len(baseline.baselines)
     console.print(
-        f"[bold green]✓ Calibration complete: "
-        f"{len(baselines)} APs baselined, "
+        f"[bold green]✓ Calibrated: {bl_count} APs, "
         f"confidence: {baseline.confidence:.0%}[/bold green]"
     )
 
-    # ─── Start Output Systems ─────────────────────────────────
+    if bl_count == 0:
+        console.print(
+            "[yellow]⚠ No APs detected. Make sure WiFi is active nearby.[/yellow]"
+        )
+
+    # ─── Start Output ─────────────────────────────────────────
     if not args.no_ruview:
         udp_sender.start()
         ws_output.start()
-        console.print("[bold green]✓ RuView integration active[/bold green]")
+        console.print("[green]✓ RuView integration active[/green]")
 
     if dashboard:
-        console.print("[bold cyan]Launching dashboard...[/bold cyan]")
-        time.sleep(1)
+        console.print("[cyan]Launching dashboard (Ctrl+C to exit)...[/cyan]")
+        time.sleep(1.5)
         dashboard.start()
 
-    # ─── Main Analysis Loop ──────────────────────────────────
+    # ─── Main Loop ────────────────────────────────────────────
     logger.info("Entering main analysis loop")
     stop_event = threading.Event()
 
     def _shutdown(signum=None, frame=None):
-        logger.info("Shutdown requested...")
+        logger.info("Shutdown signal received")
         stop_event.set()
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
     analysis_interval = 1.0 / config.DASHBOARD_REFRESH_RATE
-    baseline_update_counter = 0
+    baseline_tick = 0
     baseline_update_ticks = int(
         config.BASELINE_UPDATE_INTERVAL / analysis_interval
     )
 
     try:
         while not stop_event.is_set():
-            loop_start = time.monotonic()
+            t0 = time.monotonic()
 
-            # Run analyses
-            motion_score = variance.analyze()
-            presence.update(motion_score)
+            # Run analysis pipeline
+            motion = variance.analyze()
+            presence.update(motion)
             counter.update()
             vitals.update()
 
             # Periodic baseline update
-            baseline_update_counter += 1
-            if baseline_update_counter >= baseline_update_ticks:
+            baseline_tick += 1
+            if baseline_tick >= baseline_update_ticks:
                 baseline.update_ema()
-                baseline_update_counter = 0
+                baseline_tick = 0
                 tracker.prune_stale()
 
-            # WebSocket data update
-            if not args.no_ruview and ws_output.is_connected:
-                data = ws_output.build_sensing_data(
-                    variance, presence, counter, vitals, tracker
-                )
-                ws_output.update_data(data)
+            # WebSocket data
+            if not args.no_ruview:
+                try:
+                    data = ws_output.build_sensing_data(
+                        variance, presence, counter, vitals, tracker
+                    )
+                    ws_output.update_data(data)
+                except Exception:
+                    pass
 
-            # Sleep to maintain rate
-            elapsed = time.monotonic() - loop_start
-            sleep_time = analysis_interval - elapsed
-            if sleep_time > 0:
-                stop_event.wait(sleep_time)
+            # Maintain loop rate
+            elapsed = time.monotonic() - t0
+            remaining = analysis_interval - elapsed
+            if remaining > 0:
+                stop_event.wait(remaining)
 
     except KeyboardInterrupt:
         pass
     finally:
         # ─── Cleanup ─────────────────────────────────────────
-        logger.info("Shutting down Sens8...")
+        logger.info("Shutting down...")
 
         if dashboard:
             dashboard.stop()
-
         scanner.stop()
         udp_sender.stop()
         ws_output.stop()
         monitor_cleanup()
 
-        console.print("\n[bold green]✓ Sens8 shutdown complete[/bold green]")
+        # Verify WiFi is restored
+        ssid = get_connected_ssid(interface)
+        if ssid:
+            console.print(f"\n[bold green]✓ WiFi connected: {ssid}[/bold green]")
+        else:
+            console.print(
+                f"\n[yellow]WiFi reconnecting... "
+                f"If it doesn't reconnect, run:[/yellow]"
+            )
+            console.print(
+                f"  [bold]sudo systemctl restart NetworkManager[/bold]"
+            )
+
+        console.print("[bold green]✓ Sens8 shutdown complete[/bold green]")
 
 
 if __name__ == "__main__":
