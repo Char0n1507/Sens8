@@ -262,14 +262,17 @@ def _create_virtual_monitor(iface: str) -> Optional[str]:
 def _enable_direct_monitor(iface: str) -> bool:
     """Convert interface to monitor mode. WARNING: disconnects WiFi."""
     try:
-        # Do NOT kill NetworkManager — that's way too aggressive
+        # Tell NetworkManager to ignore this interface so it doesn't kill it
+        _run(f"nmcli dev set {iface} managed no", check=False)
+        time.sleep(0.5)
+
         _run(f"ip link set {iface} down")
         _run(f"iw dev {iface} set type monitor")
         _run(f"ip link set {iface} up")
 
         mode = get_current_mode(iface)
         if mode == "monitor":
-            logger.info(f"✓ {iface} in direct monitor mode (WiFi disconnected)")
+            logger.info(f"✓ {iface} in direct monitor mode (NetworkManager bypassed)")
             return True
         else:
             logger.error(f"Monitor mode failed (mode={mode}), restoring...")
@@ -289,6 +292,9 @@ def _restore_interface(iface: str):
         _run(f"ip link set {iface} down", check=False)
         _run(f"iw dev {iface} set type managed", check=False)
         _run(f"ip link set {iface} up", check=False)
+        
+        # Tell NetworkManager to manage it again
+        _run(f"nmcli dev set {iface} managed yes", check=False)
 
         # Restart NetworkManager to reconnect
         _run("systemctl restart NetworkManager", check=False)
