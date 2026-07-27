@@ -320,8 +320,19 @@ class Dashboard:
         table.add_column("Δσ", justify="right", style="dim", width=5)
         table.add_column("Motion", justify="right", width=7)
 
-        aps = self.tracker.get_strongest_aps(n=12)
+        # Fetch all recent APs
+        all_aps = self.tracker.get_strongest_aps(n=999, max_age=15.0)
         per_ap = self.variance.per_ap_results
+
+        # Sort by motion variance first, then RSSI
+        def sort_key(ap):
+            vr = per_ap.get(ap.mac)
+            motion = vr.motion_score if vr else 0.0
+            rssi = ap.latest_rssi or -999
+            return (motion, rssi)
+
+        all_aps.sort(key=sort_key, reverse=True)
+        aps = all_aps[:12]
 
         for ap in aps:
             name = ap.ssid or ap.mac[:17]
