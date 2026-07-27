@@ -45,10 +45,10 @@ class CSIFrameBuilder:
     └─────────────────────────────────────────────┘
     """
 
-    # Frame constants
-    MAGIC = b"CSI\x00"
-    VERSION = 0x02
-    SOURCE_SOFTWARE = 0xFF
+    # ADR-018 Frame constants
+    MAGIC = 0xC5110001
+    NODE_ID = 255
+    NUM_ANTENNAS = 1
     NUM_SUBCARRIERS = config.CSI_SUBCARRIERS
 
     def __init__(self, variance: VarianceAnalyzer,
@@ -62,138 +62,98 @@ class CSIFrameBuilder:
     def build_frame(self) -> bytes:
         """
         Build a single synthetic CSI frame from current sensing state.
-        Returns raw bytes ready for UDP transmission.
+        Returns raw bytes ready for UDP transmission (ADR-018 compliant).
         """
         self._seq = (self._seq + 1) % 65536
-        now = int(time.time())
 
         # Get current state
         motion_score = self.variance.motion_score
-        pres = self.presence.state
-        count = self.counter.result
 
-        # Build flags
-        flags = 0
-        if pres.present:
-            flags |= 0x01  # Presence detected
-        if motion_score > config.PRESENCE_THRESHOLD:
-            flags |= 0x02  # Motion detected
-        if count.count > 0:
-            flags |= 0x04  # Occupancy detected
-        flags |= 0x80  # Software source flag
-
-        # ─── Header ────────────────────────────────────────────
+        # ─── Header (20 bytes) ─────────────────────────────────
+        # Offset  Size  Field
+        # 0       4     Magic: 0xC5110001
+        # 4       1     Node ID
+        # 5       1     Number of antennas
+        # 6       2     Number of subcarriers
+        # 8       4     Frequency MHz
+        # 12      4     Sequence number
+        # 16      1     RSSI (i8)
+        # 17      1     Noise floor (i8)
+        # 18      1     PPDU type (0)
+        # 19      1     Flags (0)
         header = struct.pack(
-            "<4sBBHIHBB",
-            self.MAGIC,           # magic
-            self.VERSION,         # version
-            self.SOURCE_SOFTWARE, # source
-            self._seq,            # sequence
-            now,                  # timestamp
-            flags,                # flags
-            min(count.count, 255),  # person_count
-            0,                    # reserved
+            "<IBBHIIbbBB",
+            self.MAGIC,
+            self.NODE_ID,
+            self.NUM_ANTENNAS,
+            self.NUM_SUBCARRIERS,
+            2437,            # Freq MHz
+            self._seq,       # Sequence
+            -50,             # Simulated RSSI
+            -95,             # Simulated Noise
+            0,               # PPDU (HT Legacy)
+            0,               # Flags
         )
 
         # ─── Synthetic CSI Data ────────────────────────────────
         amplitudes, phases = self._synthesize_csi(motion_score)
 
-        csi_data = b""
+        csi_data = bytearray()
         for i in range(self.NUM_SUBCARRIERS):
-            amp = int(np.clip(amplitudes[i] * 32767, -32768, 32767))
-            ph = int(np.clip(phases[i] * 32767, -32768, 32767))
-            csi_data += struct.pack("<hh", amp, ph)
+            # ADR-018 expects I/Q as i8 pairs (-128 to 127)
+            amp = amplitudes[i] * 120.0
+            ph = phases[i]
+            
+            i_val = int(np.clip(amp * np.cos(ph), -128, 127))
+            q_val = int(np.clip(amp * np.sin(ph), -128, 127))
+            
+            csi_data.extend(struct.pack("<bb", i_val, q_val))
 
-        # ─── Metadata ──────────────────────────────────────────
-        meta = self._build_metadata(motion_score, pres, count)
-
-        return header + csi_data + meta
+        # ADR-018 does not use the metadata suffix, so we omit it
+        # to ensure strict compliance with RuView decoders.
+        return header + csi_data
 
     def _synthesize_csi(self, motion_score: float):
         """
         Map RSSI variance data to synthetic subcarrier amplitudes and phases.
-
-        - Baseline (no motion): low-amplitude, near-zero phase
-        - Motion: increased amplitude variation, phase shifts
-        - Person count: more clusters → more complex patterns
         """
         n = self.NUM_SUBCARRIERS
-
-        # Get per-AP variance results for texture
         per_ap = self.variance.per_ap_results
         ap_count = len(per_ap)
 
-        # Base amplitude from overall signal levels
         base_amp = 0.3 + motion_score * 0.5
-
-        # Generate amplitude profile
         amplitudes = np.ones(n, dtype=np.float64) * base_amp
 
         if ap_count > 0:
-            # Map per-AP variance to subcarrier groups
             group_size = max(1, n // max(ap_count, 1))
             for idx, (mac, vr) in enumerate(per_ap.items()):
                 start = (idx * group_size) % n
                 end = min(start + group_size, n)
-                # Variance → amplitude modulation
                 amp_mod = vr.raw_variance / 10.0
                 amplitudes[start:end] *= (1.0 + amp_mod)
 
-        # Add noise proportional to motion
         noise = np.random.normal(0, motion_score * 0.1, n)
         amplitudes += noise
         amplitudes = np.clip(amplitudes, 0.0, 1.0)
 
-        # Generate phase profile
         phases = np.zeros(n, dtype=np.float64)
-
         if motion_score > 0.1:
-            # Motion causes phase shifts
             phase_shift = motion_score * np.pi
-            # Create phase gradient across subcarriers
             phases = np.linspace(-phase_shift, phase_shift, n)
-            # Add person-count dependent complexity
             count = self.counter.count
             if count > 1:
                 for k in range(1, min(count, 4)):
                     phases += 0.3 * np.sin(2 * np.pi * k * np.arange(n) / n)
 
-            # Normalize to [-1, 1]
-            if np.max(np.abs(phases)) > 0:
-                phases /= np.max(np.abs(phases))
-
         return amplitudes, phases
 
-    def _build_metadata(self, motion_score: float,
-                        pres, count) -> bytes:
-        """Build metadata suffix for the frame."""
-        meta_str = (
-            f"motion={motion_score:.3f},"
-            f"presence={int(pres.present)},"
-            f"confidence={pres.confidence:.3f},"
-            f"count={count.count},"
-            f"count_conf={count.confidence:.3f},"
-            f"source={config.CSI_SOURCE_TAG}"
-        )
-        meta_bytes = meta_str.encode("ascii")
-        # Prefix with length byte
-        return struct.pack("<H", len(meta_bytes)) + meta_bytes
-
     def build_empty_frame(self) -> bytes:
-        """Build a minimal frame indicating no sensing data (keepalive)."""
+        """Build a minimal valid ADR-018 frame (keepalive)."""
         self._seq = (self._seq + 1) % 65536
-        now = int(time.time())
-
         header = struct.pack(
-            "<4sBBHIHBB",
-            self.MAGIC, self.VERSION, self.SOURCE_SOFTWARE,
-            self._seq, now, 0x80, 0, 0
+            "<IBBHIIbbBB",
+            self.MAGIC, self.NODE_ID, self.NUM_ANTENNAS, self.NUM_SUBCARRIERS,
+            2437, self._seq, -50, -95, 0, 0
         )
-
-        # Flat CSI — no motion
-        csi_data = struct.pack("<hh", 100, 0) * self.NUM_SUBCARRIERS
-
-        meta = b"source=software-rssi,keepalive=1"
-        meta_frame = struct.pack("<H", len(meta)) + meta
-
-        return header + csi_data + meta_frame
+        csi_data = struct.pack("<bb", 100, 0) * self.NUM_SUBCARRIERS
+        return header + csi_data
