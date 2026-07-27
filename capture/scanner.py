@@ -55,14 +55,44 @@ class ManagedScanner:
         self._callbacks.append(cb)
 
     def start(self):
-        """Start scanning."""
+        """Start scanning in background thread."""
         self._running = True
         self._start_time = time.time()
         self._thread = threading.Thread(
             target=self._scan_loop, daemon=True, name="managed-scanner"
         )
         self._thread.start()
+
+        # Start a background ping to the gateway to ensure continuous radio traffic
+        # This is REQUIRED in managed mode because without active traffic, there are
+        # no radio waves to bounce off moving bodies for station dump to measure.
+        self._ping_thread = threading.Thread(
+            target=self._active_ping_loop, daemon=True, name="active-ping"
+        )
+        self._ping_thread.start()
         logger.info("✓ Managed-mode scanner running (WiFi preserved)")
+
+    def _active_ping_loop(self):
+        """Ping the gateway continuously to force Wi-Fi packet exchange."""
+        try:
+            # Find default gateway
+            result = subprocess.run(
+                "ip route show default | awk '{print $3}'",
+                shell=True, capture_output=True, text=True
+            )
+            gw = result.stdout.strip()
+            if not gw:
+                return
+            
+            logger.info(f"Starting active ping to gateway {gw} for continuous sensing...")
+            while self._running:
+                subprocess.run(
+                    f"ping -c 1 -W 1 {gw} >/dev/null 2>&1",
+                    shell=True
+                )
+                time.sleep(0.1)  # 10 packets per second
+        except Exception:
+            pass
 
     def stop(self):
         self._running = False
