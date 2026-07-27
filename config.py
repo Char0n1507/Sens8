@@ -22,8 +22,8 @@ CHANNELS_24GHZ = [1, 6, 11]        # 2.4 GHz non-overlapping
 CHANNELS_5GHZ = [36, 40, 44, 48]   # 5 GHz channels
 
 # ─── Managed Mode Scan Settings ──────────────────────────────────────
-MANAGED_SCAN_INTERVAL = 3.0        # seconds between full scan triggers
-MANAGED_DUMP_INTERVAL = 0.8        # seconds between scan dump reads
+MANAGED_SCAN_INTERVAL = 1.5        # seconds between full scan triggers
+MANAGED_DUMP_INTERVAL = 0.3        # seconds between scan dump reads
 # Lower dump interval = faster RSSI updates = better accuracy
 
 # ─── Baseline Calibration ────────────────────────────────────────────
@@ -32,11 +32,11 @@ BASELINE_UPDATE_INTERVAL = 60      # seconds between EMA updates
 BASELINE_EMA_ALPHA = 0.1           # exponential moving average alpha
 
 # ─── Motion Detection ────────────────────────────────────────────────
-MOTION_WINDOW = 10                  # seconds (increased from 5 for more data)
+MOTION_WINDOW = 15                  # seconds (increased from 5 for more data)
 MOTION_SCORE_SMOOTHING = 0.4       # EMA alpha for motion score
 
 # ─── Presence Detection ──────────────────────────────────────────────
-PRESENCE_THRESHOLD = 0.15          # variance threshold (tuned lower for managed)
+PRESENCE_THRESHOLD = 0.08          # variance threshold (tuned lower for managed)
 PRESENCE_HYSTERESIS = 3            # consecutive frames before state change
 PRESENCE_MAX_CONFIDENCE = 0.75     # cap — honest about RSSI limitations
 

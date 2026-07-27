@@ -75,7 +75,7 @@ class VarianceAnalyzer:
         Run variance analysis on all visible APs.
         Returns fused motion score (0.0 to 1.0).
         """
-        aps = self.tracker.get_aps(min_samples=3)
+        aps = self.tracker.get_aps(min_samples=1)
         if not aps:
             self._motion_score *= 0.9  # Decay
             return self._motion_score
@@ -94,10 +94,10 @@ class VarianceAnalyzer:
             return self._motion_score
 
         # ─── Weighted Fusion ──────────────────────────────────
-        # Use only APs with weight > 0.15 to reject noisy far-away APs
-        good_results = [r for r in results if r.weight > 0.15]
+        # Use top APs for fusion
+        good_results = [r for r in results if r.weight > 0.1]
         if not good_results:
-            good_results = results[:3]  # Use top 3 anyway
+            good_results = results[:5]
 
         total_weight = sum(r.weight for r in good_results)
         if total_weight <= 0:
@@ -123,46 +123,40 @@ class VarianceAnalyzer:
     def _analyze_ap(self, ap: DeviceRecord) -> Optional[VarianceResult]:
         """Analyze RSSI variance for a single AP with improved accuracy."""
         rssi = ap.get_rssi_array(seconds=config.MOTION_WINDOW)
-        if len(rssi) < 3:
+        if len(rssi) == 0:
             return None
 
-        # ─── Compute deltas (first differences) ──────────────
-        deltas = np.diff(rssi)
-        if len(deltas) < 2:
-            return None
+        if len(rssi) == 1:
+            mean_delta = 0.0
+            std_delta = 0.0
+            peak_delta = 0.0
+            variance = 0.0
+            zero_crossings = 0
+            motion_score = 0.0
+        else:
+            deltas = np.diff(rssi)
+            mean_delta = float(np.mean(deltas))
+            std_delta = float(np.std(deltas))
+            peak_delta = float(np.max(np.abs(deltas))) if len(deltas) > 0 else 0.0
+            variance = float(np.var(deltas)) if len(deltas) > 0 else 0.0
 
-        mean_delta = float(np.mean(deltas))
-        std_delta = float(np.std(deltas))
-        peak_delta = float(np.max(np.abs(deltas)))
-        variance = float(np.var(deltas))
+            signs = np.sign(deltas)
+            sign_changes = np.diff(signs)
+            zero_crossings = int(np.count_nonzero(sign_changes))
 
-        # Zero crossings — movement creates oscillations
-        signs = np.sign(deltas)
-        sign_changes = np.diff(signs)
-        zero_crossings = int(np.count_nonzero(sign_changes))
+            bl = self.baseline.baselines.get(ap.mac)
+            noise_floor = 1.0
 
-        # ─── Adaptive normalization ───────────────────────────
-        # Baseline-aware: compare current variance to baseline noise floor
-        bl = self.baseline.baselines.get(ap.mac)
-        noise_floor = 1.0  # default noise floor
+            if bl and bl.std_rssi > 0:
+                noise_floor = max(bl.std_rssi, 0.5)
 
-        if bl and bl.std_rssi > 0:
-            noise_floor = max(bl.std_rssi, 0.5)
+            excess_ratio = variance / (noise_floor ** 2 + 0.05)
+            motion_score = min(1.0, excess_ratio / 2.5)
 
-        # Motion score: how much variance exceeds the noise floor
-        # Higher ratio = more likely real motion vs ambient noise
-        excess_ratio = variance / (noise_floor ** 2 + 0.1)
-
-        # Normalize to 0-1 with soft clamp
-        # For managed mode: scans have inherent ~1-2 dBm jitter
-        # Real motion typically causes 3-10+ dBm swings
-        motion_score = min(1.0, excess_ratio / 5.0)
-
-        # Boost if there are many zero crossings (oscillation = movement)
-        if len(deltas) > 5:
-            zc_rate = zero_crossings / len(deltas)
-            if zc_rate > 0.5:  # High oscillation
-                motion_score = min(1.0, motion_score * 1.3)
+            if len(deltas) > 3:
+                zc_rate = zero_crossings / len(deltas)
+                if zc_rate > 0.4:
+                    motion_score = min(1.0, motion_score * 1.3)
 
         # ─── Weight by signal quality ─────────────────────────
         latest = ap.latest_rssi or -90
