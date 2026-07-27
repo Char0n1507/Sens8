@@ -95,9 +95,8 @@ class ManagedScanner:
             except Exception as e:
                 logger.debug(f"Scan iteration error: {e}")
 
-            # Also collect station info for connected AP (very detailed RSSI)
-            if iteration % 3 == 0:
-                self._read_station_dump()
+            # Always collect station info for connected AP (real-time high-freq RSSI)
+            self._read_station_dump()
 
             time.sleep(dump_interval)
 

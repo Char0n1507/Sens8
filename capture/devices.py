@@ -34,12 +34,19 @@ class DeviceRecord:
         default_factory=lambda: deque(maxlen=config.RSSI_WINDOW_SIZE)
     )
 
-    def add_rssi(self, rssi: int, timestamp: float):
-        """Append an RSSI sample."""
-        self.rssi_history.append((timestamp, rssi))
+    def add_rssi(self, rssi: int, timestamp: float, min_interval: float = 0.6):
+        """Append an RSSI sample, filtering out static cache duplicates."""
         self.last_seen = timestamp
         if self.first_seen == 0:
             self.first_seen = timestamp
+
+        if self.rssi_history:
+            last_t, last_r = self.rssi_history[-1]
+            # Ignore static identical duplicates added faster than min_interval
+            if last_r == rssi and (timestamp - last_t) < min_interval:
+                return
+
+        self.rssi_history.append((timestamp, rssi))
 
     @property
     def latest_rssi(self) -> Optional[int]:
